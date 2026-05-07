@@ -1,176 +1,240 @@
 # DocuMind
 
-Chat with PDFs and text files using retrieval-augmented generation.
+DocuMind is a web-based document question-answering application that lets users upload a PDF or text file and ask questions grounded in the uploaded document.
 
-## Problem statement
+It implements a complete Retrieval-Augmented Generation (RAG) pipeline: document upload, text extraction, chunking, embedding, vector storage, semantic retrieval, and grounded answer generation.
 
-Students and knowledge workers often need quick answers from long PDFs or notes, but manually scanning documents is slow and keyword search misses meaning. DocuMind solves that by indexing an uploaded document, retrieving the most relevant chunks semantically, and generating answers grounded only in those chunks.
+## Live Project
+
+https://documind-five-theta.vercel.app/
+
+## GitHub Repository
+
+https://github.com/Lekhana-Dinesh/DocuMind
 
 ## Features
 
-- Upload `.pdf` and `.txt` files through a polished Next.js interface.
-- Stream indexing progress across extraction, chunking, embedding, and storage.
-- Preserve source file name, page number, chunk index, and session ID metadata.
-- Use Gemini embeddings for semantic vector search.
-- Use Qdrant Cloud when configured, with an in-memory fallback for local demos.
-- Retrieve top relevant chunks before every answer.
-- Refuse honestly when the answer is not supported by the uploaded document.
-- Show source snippets with page/chunk references so grounding is easy to verify.
-- Clear the current document session and upload another file.
+- Upload PDF and plain text documents.
+- Extract document text on the server.
+- Split extracted text into overlapping chunks.
+- Generate semantic embeddings using Gemini.
+- Store and retrieve embeddings using Qdrant Cloud.
+- Ask natural language questions about the uploaded document.
+- Generate answers using only retrieved document context.
+- Refuse unsupported questions when the answer is not present in the document.
+- Display source snippets with chunk/page metadata for verification.
+- Clear the current document and upload another file.
 
-## Tech stack
+## Tech Stack
 
-- Next.js App Router
-- TypeScript
-- Tailwind CSS
-- Gemini API via `@google/genai`
-- Qdrant Cloud
-- `pdf-parse` for PDF text extraction
-- Lightweight custom chunking and retrieval logic
+| Area | Technology |
+|---|---|
+| Frontend | Next.js App Router, React, TypeScript |
+| Styling | Tailwind CSS |
+| Backend | Next.js API Routes |
+| LLM | Gemini |
+| Embeddings | Gemini Embeddings |
+| Vector Database | Qdrant Cloud |
+| PDF Parsing | pdf-parse |
+| Deployment | Vercel |
 
-## Architecture diagram
+## How It Works
 
 ```text
-Browser UI
-  -> /api/upload
-     -> extract text
-     -> recursive chunking
-     -> Gemini embeddings
-     -> Qdrant or in-memory store
-
-Browser UI
-  -> /api/chat
-     -> Gemini query embedding
-     -> semantic retrieval from Qdrant or memory
-     -> Gemini grounded answer generation
-     -> answer + source snippets
+User uploads PDF/TXT
+        ↓
+Server extracts text
+        ↓
+Text is split into chunks
+        ↓
+Gemini creates embeddings
+        ↓
+Qdrant stores vectors + metadata
+        ↓
+User asks a question
+        ↓
+Question is embedded
+        ↓
+Relevant chunks are retrieved
+        ↓
+Gemini answers using retrieved context only
+        ↓
+Answer + source snippets are shown
 ```
 
-## RAG pipeline
+## RAG Pipeline
 
-`Upload -> Extract -> Chunk -> Gemini Embed -> Store -> Retrieve -> Gemini Generate`
+### 1. Document Upload
 
-1. The user uploads a PDF or text file.
-2. The server extracts plain text and keeps page metadata for PDFs where available.
-3. A lightweight custom chunker splits the text into overlapping chunks.
-4. Gemini embeddings convert chunks into vectors.
-5. Vectors are stored in Qdrant Cloud, or a local in-memory fallback for demos.
-6. On each question, DocuMind embeds the query and retrieves the most relevant chunks.
-7. Gemini generates an answer using only the retrieved context.
+The user uploads a `.pdf` or `.txt` file through the web interface. Upload processing happens on the server so API keys and database credentials are not exposed to the client.
 
-## Chunking strategy
+### 2. Text Extraction
 
-- Implementation: custom chunking utility in `lib/rag/chunkDocument.ts`
-- Chunk size: `900`
-- Chunk overlap: `120`
-- Metadata stored with each chunk:
-  - source file name
-  - page number when available
-  - chunk index
-  - session ID
+The app extracts readable text from the uploaded document. Text files are read directly, while PDFs are processed using `pdf-parse`.
 
-This keeps chunks large enough for meaning, but small enough for focused retrieval.
+### 3. Chunking Strategy
 
-The app intentionally uses a lightweight custom RAG pipeline rather than a heavier orchestration layer. That keeps the code easier to understand, debug, and explain in an interview or assignment demo.
+DocuMind uses a lightweight custom chunking utility.
 
-## Vector database strategy
+Current configuration:
 
-### Recommended production mode
+```text
+Chunk size: 900 characters
+Chunk overlap: 120 characters
+```
 
-Configure:
+Each chunk stores metadata:
 
-- `QDRANT_URL`
-- `QDRANT_API_KEY`
-- `QDRANT_COLLECTION`
+```text
+documentId
+fileName
+pageNumber
+chunkIndex
+text
+```
 
-In this mode, DocuMind stores chunk vectors in Qdrant Cloud and filters by `sessionId` so unrelated uploads do not mix.
+The overlap helps preserve context across chunk boundaries and improves retrieval quality.
 
-### Demo/dev fallback mode
+### 4. Embedding
 
-If `QDRANT_URL` is missing, DocuMind falls back to an in-memory store.
+Each document chunk is converted into a vector using Gemini embeddings.
 
-Important:
+Default embedding model:
 
-- This mode is useful for local demos only.
-- It is not persistent.
-- It is not production-grade.
-- It can reset whenever the server restarts.
+```env
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+```
 
-## Grounding and hallucination prevention
+The same embedding model is used to embed user questions during retrieval.
 
-- Gemini receives only retrieved chunks, not the whole document by default.
-- The system instruction explicitly forbids outside knowledge.
-- If no chunks are retrieved, DocuMind refuses.
-- If retrieved chunks are too weak or too short, DocuMind refuses.
-- If Gemini returns an unsupported or uncited answer, DocuMind refuses.
-- Source snippets are always shown in the UI for manual verification.
+### 5. Vector Storage
 
-Refusal message:
+Embeddings are stored in Qdrant Cloud with payload metadata. The app filters retrieval by `documentId`, so each chat session only searches inside the currently uploaded document.
 
-`I could not find enough information in the uploaded document to answer that.`
+### 6. Retrieval
 
-## Gemini-only setup
+For every user question, DocuMind embeds the question and retrieves the most relevant chunks from Qdrant using semantic search.
 
-This project uses Gemini only.
+### 7. Grounded Answer Generation
 
-- Gemini is used for answer generation.
-- Gemini embeddings are used for vector search.
-- Qdrant is used as the vector database.
-- No other model provider SDK or embedding pipeline is used in the app.
+Only the retrieved chunks are passed to Gemini. The model is instructed to answer only from the provided context.
 
-## Screenshots
+If the answer is not found in the uploaded document, DocuMind responds:
 
-- Add landing page screenshot here
-- Add upload/indexing screenshot here
-- Add chat + sources screenshot here
+```text
+I could not find enough information in the uploaded document to answer that.
+```
 
-## Local setup
+## Grounding and Source Verification
 
-### 1. Clone and enter the project
+DocuMind is designed to reduce hallucination by:
+
+- Passing only retrieved chunks to the LLM.
+- Filtering retrieval by the active document session.
+- Refusing when context is missing or insufficient.
+- Showing source snippets used for the answer.
+- Including chunk/page metadata where available.
+
+This makes each answer easier to verify against the original document.
+
+## Project Structure
+
+```text
+DocuMind/
+  app/
+    api/
+      upload/route.ts
+      chat/route.ts
+    page.tsx
+
+  components/
+    ChatPanel.tsx
+    FileUpload.tsx
+    HomePageClient.tsx
+    HowItWorks.tsx
+    SourceCard.tsx
+    StatusSteps.tsx
+
+  lib/
+    rag/
+      chunkDocument.ts
+      embeddings.ts
+      extractText.ts
+      generateAnswer.ts
+      retrieve.ts
+      vectorStore.ts
+    env.ts
+    types.ts
+```
+
+## Environment Variables
+
+Create a `.env.local` file for local development.
+
+```env
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+
+QDRANT_URL=
+QDRANT_API_KEY=
+QDRANT_COLLECTION=documind_rag_v3
+
+DEBUG_RAG=
+```
+
+`DEBUG_RAG=true` enables detailed Qdrant diagnostics during local debugging. It should usually be left blank in production.
+
+## Local Setup
+
+Clone the repository:
 
 ```bash
-git clone <YOUR_GITHUB_REPO_URL>
-cd documind-rag
+git clone https://github.com/Lekhana-Dinesh/DocuMind.git
+cd DocuMind
 ```
 
-### 2. Create your environment file
+Install dependencies:
+
+```bash
+npm install
+```
+
+Create the environment file:
 
 ```bash
 cp .env.example .env.local
 ```
 
-On Windows PowerShell:
+For Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env.local
 ```
 
-### 3. Fill in the environment variables
-
-At minimum:
-
-- `GEMINI_API_KEY`
-
-Recommended for production-style testing:
-
-- `QDRANT_URL`
-- `QDRANT_API_KEY`
-- `QDRANT_COLLECTION`
-
-### 4. Install and run
+Run the development server:
 
 ```bash
-npm install
 npm run dev
 ```
 
-### 5. Build check
+Open:
+
+```text
+http://localhost:3000
+```
+
+## Build
 
 ```bash
 npm run build
 ```
 
-## Environment variables
+## Deployment
+
+The project is deployed on Vercel.
+
+Before deployment, add the required environment variables in the Vercel project settings:
 
 ```env
 GEMINI_API_KEY=
@@ -178,96 +242,59 @@ GEMINI_MODEL=gemini-2.5-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 QDRANT_URL=
 QDRANT_API_KEY=
-QDRANT_COLLECTION=documind_rag
+QDRANT_COLLECTION=documind_rag_v3
+DEBUG_RAG=
 ```
 
-## Vercel deployment steps
+After adding environment variables, redeploy the project.
 
-1. Push the repository to GitHub.
-2. Import the repo into Vercel.
-3. Add the environment variables from `.env.example` in the Vercel dashboard.
-4. Set `QDRANT_URL`, `QDRANT_API_KEY`, and `QDRANT_COLLECTION` for production mode.
-5. Deploy.
-6. Upload a document in the live app and verify source-grounded answers.
+## Testing
 
-## Qdrant Cloud setup steps
+Use a sample text file:
 
-1. Create a free cluster in Qdrant Cloud.
-2. Copy the cluster URL into `QDRANT_URL`.
-3. Create an API key and copy it into `QDRANT_API_KEY`.
-4. Set `QDRANT_COLLECTION=documind_rag`.
-5. Redeploy or restart the app after updating environment variables.
+```text
+DocuMind is a document question answering app.
+It uses Gemini embeddings, Qdrant vector storage, and Gemini answer generation.
+The app answers only from uploaded document content.
+```
 
-## Troubleshooting
+Ask:
 
-- If Qdrant returns a vector size mismatch, delete the old collection or change `QDRANT_COLLECTION` to a fresh name.
-- If `QDRANT_URL` is empty, DocuMind automatically falls back to the in-memory demo store.
-- If `GEMINI_API_KEY` is missing, upload and chat requests will fail with a clear configuration error.
+```text
+What vector storage does DocuMind use?
+```
 
-## How to test/demo
+Expected behavior:
 
-1. Start the app with `npm run dev`.
-2. Upload a PDF or `.txt` file with enough content to ask multiple questions.
-3. Watch the indexing status move through extraction, chunking, embedding, and storage.
-4. Ask a question that is clearly answered in the document.
-5. Ask a second question that is not covered by the document.
-6. Verify that DocuMind refuses honestly and still shows grounding behavior.
+- The app answers from the document.
+- The answer mentions Qdrant.
+- A source snippet is shown.
 
-## Assignment rubric mapping
+Ask an unrelated question:
 
-### GitHub repository: 2 marks
+```text
+Who is the CEO of Google?
+```
 
-- Clean folder structure
-- Clear README
-- Portfolio-ready commit history once pushed
+Expected behavior:
 
-### Live project: 2 marks
+- The app refuses because the answer is not present in the uploaded document.
 
-- Next.js app deployable on Vercel
-- Qdrant Cloud supported for deployed usage
 
-### RAG pipeline: 3 marks
-
-- Upload
-- Extract
-- Chunk
-- Gemini embed
-- Store
-- Retrieve
-- Gemini generate
-
-### Answer quality and grounding: 2 marks
-
-- Retrieval-only context
-- Honest refusal when context is weak
-- Source snippets with metadata
-
-### Code quality and documentation: 1 mark
-
-- TypeScript types
-- Modular `lib/rag` structure
-- README explains design decisions
 
 ## Limitations
 
-- Text extraction quality depends on the PDF structure.
-- The in-memory vector store is only for local/demo use.
-- Large uploads may be limited by your hosting platform's request size.
-- Single-document session flow is optimized for clarity, not multi-user scale.
+- Scanned PDFs are not supported unless they contain selectable text.
+- Very large documents may be limited by hosting request size limits.
+- The current version focuses on one active document session at a time.
+- Multi-document workspaces and user accounts are not included yet.
 
-## Future improvements
+## Future Improvements
 
-- Multi-document workspaces
-- Persisted document history
-- Hybrid retrieval with metadata filtering
-- Streaming chat responses
 - OCR support for scanned PDFs
-- Auth and per-user document libraries
-
-## Live link
-
-`Add your Vercel URL here`
-
-## GitHub link
-
-`Add your GitHub repo URL here`
+- Multi-document workspaces
+- Persistent document history
+- User authentication
+- Streaming responses
+- Hybrid keyword + vector search
+- Exportable chat history
