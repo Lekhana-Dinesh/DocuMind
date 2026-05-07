@@ -13,3 +13,5 @@ pnpm-debug.log*
 .env.production.local
 !.env.example
 coverage
+
+.tmp/

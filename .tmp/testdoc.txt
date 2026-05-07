@@ -1,6 +1,0 @@
-DocuMind Test Notes
-
-The campus library opens at 8 AM on weekdays and closes at 9 PM.
-Students can borrow up to 3 books at a time.
-Late returns incur a fine of 5 dollars per day.
-The digital archive is available only to enrolled students.
