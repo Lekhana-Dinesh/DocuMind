@@ -11,7 +11,9 @@ import type {
   ChatMessage,
   IndexingStage,
   IndexingStep,
+  RetrievalMode,
   SourceSnippet,
+  SourceType,
   UploadedDocument,
   UploadStreamEvent,
 } from "@/lib/types";
@@ -20,17 +22,25 @@ interface HomePageClientProps {
   qdrantConfigured: boolean;
 }
 
+interface RetrievalMeta {
+  retrievalMode: RetrievalMode;
+  originalQuery: string;
+  finalQuery: string;
+  rewrittenQuery?: string;
+  evaluationReason: string;
+}
+
 const STEP_TEMPLATE: IndexingStep[] = [
   {
     key: "extracting",
     label: "Extracting text",
-    description: "Read the uploaded file and extract plain text with page metadata when available.",
+    description: "Read the source and extract clean text with source metadata where available.",
     status: "pending",
   },
   {
     key: "chunking",
     label: "Splitting into chunks",
-    description: "Break the document into overlapping sections for semantic retrieval.",
+    description: "Break the source into overlapping sections for semantic retrieval.",
     status: "pending",
   },
   {
@@ -47,8 +57,8 @@ const STEP_TEMPLATE: IndexingStep[] = [
   },
   {
     key: "ready",
-    label: "Ready to chat",
-    description: "The document is indexed and can now be queried through retrieval-augmented generation.",
+    label: "Ready to answer",
+    description: "The indexed workspace is ready for grounded questions and source-backed answers.",
     status: "pending",
   },
 ];
@@ -66,7 +76,7 @@ const STAGE_LABELS: Record<IndexingStage, string> = {
   chunking: "Splitting into chunks",
   embedding: "Creating embeddings",
   storing: "Saving to vector database",
-  ready: "Ready to chat",
+  ready: "Ready to answer",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,9 +84,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isIndexingStage(value: unknown): value is IndexingStage {
+  return typeof value === "string" && STEP_ORDER.includes(value as IndexingStage);
+}
+
+function isSourceType(value: unknown): value is SourceType {
   return (
-    typeof value === "string" &&
-    STEP_ORDER.includes(value as IndexingStage)
+    value === "pdf" ||
+    value === "text" ||
+    value === "csv" ||
+    value === "web_page"
+  );
+}
+
+function isRetrievalMode(value: unknown): value is RetrievalMode {
+  return value === "direct" || value === "corrected" || value === "insufficient";
+}
+
+function isUploadedDocument(value: unknown): value is UploadedDocument {
+  return (
+    isRecord(value) &&
+    typeof value.sessionId === "string" &&
+    typeof value.sourceId === "string" &&
+    typeof value.fileName === "string" &&
+    typeof value.fileType === "string" &&
+    isSourceType(value.sourceType) &&
+    (value.sourceUrl === undefined || typeof value.sourceUrl === "string") &&
+    typeof value.pageCount === "number" &&
+    typeof value.chunkCount === "number" &&
+    (value.storageMode === "qdrant" || value.storageMode === "memory")
   );
 }
 
@@ -105,18 +140,22 @@ function isUploadErrorEvent(
 function isUploadCompleteEvent(
   event: unknown,
 ): event is Extract<UploadStreamEvent, { type: "complete" }> {
-  const data = isRecord(event) ? event.data : null;
+  return isRecord(event) && event.type === "complete" && isUploadedDocument(event.data);
+}
 
+function isSourceSnippet(value: unknown): value is SourceSnippet {
   return (
-    isRecord(event) &&
-    event.type === "complete" &&
-    isRecord(data) &&
-    typeof data.sessionId === "string" &&
-    typeof data.fileName === "string" &&
-    typeof data.fileType === "string" &&
-    typeof data.pageCount === "number" &&
-    typeof data.chunkCount === "number" &&
-    (data.storageMode === "qdrant" || data.storageMode === "memory")
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.sourceId === "string" &&
+    typeof value.fileName === "string" &&
+    typeof value.fileType === "string" &&
+    isSourceType(value.sourceType) &&
+    (value.sourceUrl === undefined || typeof value.sourceUrl === "string") &&
+    typeof value.text === "string" &&
+    (value.pageNumber === undefined || typeof value.pageNumber === "number") &&
+    typeof value.chunkIndex === "number" &&
+    (value.score === undefined || typeof value.score === "number")
   );
 }
 
@@ -126,14 +165,19 @@ function isChatApiResponse(payload: unknown): payload is ChatApiResponse {
     typeof payload.answer === "string" &&
     typeof payload.refused === "boolean" &&
     Array.isArray(payload.sources) &&
-    Array.isArray(payload.citationIds)
+    payload.sources.every(isSourceSnippet) &&
+    Array.isArray(payload.citationIds) &&
+    payload.citationIds.every((value) => typeof value === "string") &&
+    isRetrievalMode(payload.retrievalMode) &&
+    typeof payload.originalQuery === "string" &&
+    typeof payload.finalQuery === "string" &&
+    (payload.rewrittenQuery === undefined ||
+      typeof payload.rewrittenQuery === "string") &&
+    typeof payload.evaluationReason === "string"
   );
 }
 
-function formatUploadFailure(
-  stage: IndexingStage | null,
-  message: string,
-) {
+function formatUploadFailure(stage: IndexingStage | null, message: string) {
   if (!stage) {
     return message;
   }
@@ -155,24 +199,58 @@ function formatUploadFailure(
   return `${STAGE_LABELS[stage]} failed: ${message}`;
 }
 
-export function HomePageClient({
-  qdrantConfigured,
-}: HomePageClientProps) {
+function formatSourceType(sourceType: SourceType) {
+  if (sourceType === "web_page") {
+    return "Web page";
+  }
+
+  if (sourceType === "csv") {
+    return "CSV";
+  }
+
+  if (sourceType === "pdf") {
+    return "PDF";
+  }
+
+  return "Text";
+}
+
+function getRetrievalModeLabel(mode: RetrievalMode) {
+  if (mode === "corrected") {
+    return "Corrected retrieval";
+  }
+
+  if (mode === "insufficient") {
+    return "Insufficient context";
+  }
+
+  return "Direct retrieval";
+}
+
+export function HomePageClient({ qdrantConfigured }: HomePageClientProps) {
   const [steps, setSteps] = useState<IndexingStep[]>(STEP_TEMPLATE);
   const [summary, setSummary] = useState<string | null>(null);
   const [documentInfo, setDocumentInfo] = useState<UploadedDocument | null>(null);
+  const [indexedSources, setIndexedSources] = useState<UploadedDocument[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sources, setSources] = useState<SourceSnippet[]>([]);
+  const [lastRetrievalMeta, setLastRetrievalMeta] = useState<RetrievalMeta | null>(
+    null,
+  );
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isAsking, setIsAsking] = useState(false);
 
-  const hasDocument = Boolean(documentInfo);
+  const hasWorkspace = Boolean(documentInfo);
   const isReady = Boolean(documentInfo && !isUploading);
   const storageBadge = qdrantConfigured
     ? "Qdrant Cloud configured"
     : "In-memory local mode";
+  const totalChunkCount = indexedSources.reduce(
+    (sum, source) => sum + source.chunkCount,
+    0,
+  );
 
   function resetSteps() {
     setSteps(STEP_TEMPLATE);
@@ -208,7 +286,7 @@ export function HomePageClient({
     );
   }
 
-  async function clearDocument(shouldCallApi = true) {
+  async function clearWorkspace(shouldCallApi = true) {
     if (shouldCallApi && documentInfo?.sessionId) {
       try {
         await fetch("/api/upload", {
@@ -219,45 +297,50 @@ export function HomePageClient({
           body: JSON.stringify({ sessionId: documentInfo.sessionId }),
         });
       } catch {
-        // Clearing the server-side session is helpful but non-blocking for the UI.
+        // Clearing the server-side workspace is helpful but non-blocking for the UI.
       }
     }
 
     setDocumentInfo(null);
+    setIndexedSources([]);
     setMessages([]);
     setSources([]);
+    setLastRetrievalMeta(null);
     setUploadError(null);
     setChatError(null);
     resetSteps();
   }
 
-  async function handleUpload(file: File) {
-    if (documentInfo?.sessionId) {
-      await clearDocument(true);
-    }
+  async function runIndexingRequest(
+    startRequest: () => Promise<Response>,
+    successMessage: (sourceCount: number) => string,
+  ) {
+    const hadWorkspace = Boolean(documentInfo?.sessionId);
+    const existingWorkspace = documentInfo;
+    const existingSources = indexedSources;
 
     setIsUploading(true);
     setUploadError(null);
     setChatError(null);
-    setMessages([]);
-    setSources([]);
+
+    if (!hadWorkspace) {
+      setMessages([]);
+      setSources([]);
+      setLastRetrievalMeta(null);
+    }
+
     resetSteps();
 
-    const formData = new FormData();
-    formData.append("file", file);
-    let completed = false;
+    const completedSources: UploadedDocument[] = [];
     let lastStage: IndexingStage | null = null;
     let errorStage: IndexingStage | null = null;
     let errorMessage: string | null = null;
 
     try {
-      const response = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
+      const response = await startRequest();
 
       if (!response.ok || !response.body) {
-        let message = "Upload failed while starting document indexing.";
+        let message = "Indexing failed while starting the request.";
 
         try {
           const payload = (await response.json()) as { error?: string };
@@ -281,7 +364,7 @@ export function HomePageClient({
         try {
           event = JSON.parse(rawLine);
         } catch {
-          throw new Error("Upload stream returned an invalid response.");
+          throw new Error("Indexing stream returned an invalid response.");
         }
 
         if (isUploadStatusEvent(event)) {
@@ -298,21 +381,11 @@ export function HomePageClient({
         }
 
         if (isUploadCompleteEvent(event)) {
-          completed = true;
-          updateStepStatus("ready");
-          setSummary("Document indexed successfully. You can now ask questions.");
-          setDocumentInfo(event.data);
-          setMessages([
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: `I indexed ${event.data.fileName} into ${event.data.chunkCount} chunks. Ask a question and I'll answer only from the uploaded document.`,
-            },
-          ]);
+          completedSources.push(event.data);
           return;
         }
 
-        throw new Error("Upload stream returned an unknown event.");
+        throw new Error("Indexing stream returned an unknown event.");
       }
 
       while (true) {
@@ -338,29 +411,105 @@ export function HomePageClient({
         }
       }
 
-      if (!completed) {
-        throw new Error(errorMessage ?? "The upload stream ended before indexing completed.");
+      const finalizedSource = completedSources.at(-1);
+
+      if (!finalizedSource) {
+        throw new Error(errorMessage ?? "The indexing stream ended before completion.");
       }
+
+      const updatedSources =
+        existingWorkspace?.sessionId === finalizedSource.sessionId
+          ? [...existingSources, finalizedSource]
+          : [finalizedSource];
+
+      updateStepStatus("ready");
+      setSummary(successMessage(updatedSources.length));
+      setDocumentInfo(finalizedSource);
+      setIndexedSources(updatedSources);
+      setSources([]);
+      setLastRetrievalMeta(null);
+      setMessages([
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content:
+            updatedSources.length === 1
+              ? `I indexed ${finalizedSource.fileName} into ${finalizedSource.chunkCount} chunks. Ask a question and I'll answer only from the indexed content.`
+              : `I added ${finalizedSource.fileName} to the workspace. ${updatedSources.length} sources are now indexed across ${updatedSources.reduce((sum, source) => sum + source.chunkCount, 0)} chunks.`,
+        },
+      ]);
     } catch (error) {
       const rawMessage =
         error instanceof Error
           ? error.message
-          : "Something went wrong while indexing the document.";
-      const failedStage = errorStage ?? (completed ? null : lastStage);
-      const displayMessage = formatUploadFailure(failedStage, rawMessage);
+          : "Something went wrong while indexing the source.";
+      const hasCompletedSource = completedSources.length > 0;
+      const resolvedFailedStage = errorStage ?? (hasCompletedSource ? null : lastStage);
+      const displayMessage = formatUploadFailure(resolvedFailedStage, rawMessage);
 
-      if (failedStage) {
-        updateStepStatus(failedStage, true);
+      if (resolvedFailedStage) {
+        updateStepStatus(resolvedFailedStage, true);
       }
 
-      setDocumentInfo(null);
-      setMessages([]);
-      setSources([]);
       setSummary(displayMessage);
       setUploadError(displayMessage);
+
+      if (!hadWorkspace) {
+        setDocumentInfo(null);
+        setIndexedSources([]);
+        setMessages([]);
+        setSources([]);
+        setLastRetrievalMeta(null);
+      }
     } finally {
       setIsUploading(false);
     }
+  }
+
+  async function handleFileUpload(file: File) {
+    const currentSessionId = documentInfo?.sessionId;
+
+    await runIndexingRequest(
+      () => {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        if (currentSessionId) {
+          formData.append("sessionId", currentSessionId);
+        }
+
+        return fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+      },
+      (sourceCount) =>
+        sourceCount === 1
+          ? "Document indexed successfully. You can now ask questions."
+          : "Source indexed successfully. You can now ask questions across all indexed content.",
+    );
+  }
+
+  async function handleUrlIngest(url: string) {
+    const currentSessionId = documentInfo?.sessionId;
+
+    await runIndexingRequest(
+      () =>
+        fetch("/api/ingest-url", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url,
+            sessionId: currentSessionId,
+          }),
+        }),
+      (sourceCount) =>
+        sourceCount === 1
+          ? "Web page indexed successfully. You can now ask questions."
+          : "Source indexed successfully. You can now ask questions across all indexed content.",
+    );
   }
 
   async function handleAsk(question: string) {
@@ -405,6 +554,14 @@ export function HomePageClient({
         throw new Error("Chat API returned an invalid response.");
       }
 
+      const retrievalMeta: RetrievalMeta = {
+        retrievalMode: payload.retrievalMode,
+        originalQuery: payload.originalQuery,
+        finalQuery: payload.finalQuery,
+        rewrittenQuery: payload.rewrittenQuery,
+        evaluationReason: payload.evaluationReason,
+      };
+
       setMessages((current) => [
         ...current,
         {
@@ -413,9 +570,14 @@ export function HomePageClient({
           content: payload.answer,
           refused: payload.refused,
           sources: payload.sources,
+          retrievalMode: payload.retrievalMode,
+          finalQuery: payload.finalQuery,
+          rewrittenQuery: payload.rewrittenQuery,
+          evaluationReason: payload.evaluationReason,
         },
       ]);
       setSources(payload.sources);
+      setLastRetrievalMeta(retrievalMeta);
     } catch (error) {
       const message =
         error instanceof Error
@@ -430,6 +592,7 @@ export function HomePageClient({
           role: "assistant",
           content: "I could not answer because the request failed on the server.",
           refused: true,
+          retrievalMode: "insufficient",
         },
       ]);
     } finally {
@@ -447,13 +610,12 @@ export function HomePageClient({
                 DocuMind
               </p>
               <h1 className="mt-3 text-4xl leading-tight text-ink sm:text-5xl">
-                Chat with PDFs and text files using retrieval-augmented generation.
+                Grounded answers over the sources you actually indexed
               </h1>
               <p className="mt-4 max-w-2xl text-base leading-8 text-ink/74">
-                Upload a document, ask questions, and get answers backed by
-                source snippets. The pipeline extracts text, chunks content,
-                creates embeddings, retrieves semantically relevant sections,
-                and generates grounded answers using only retrieved context.
+                Add documents and web pages, ask natural language questions, and
+                review the exact snippets behind every response. DocuMind uses a
+                corrective retrieval loop to retry weak searches before it answers.
               </p>
             </div>
 
@@ -475,16 +637,18 @@ export function HomePageClient({
         <section className="mt-8 grid gap-6 xl:grid-cols-[1.05fr,1.25fr]">
           <div className="space-y-6">
             <FileUpload
-              onSelect={handleUpload}
+              onSelectFile={handleFileUpload}
+              onSelectUrl={handleUrlIngest}
               isUploading={isUploading}
-              hasDocument={hasDocument}
+              hasWorkspace={hasWorkspace}
+              workspaceSourceCount={indexedSources.length}
             />
 
             <StatusSteps steps={steps} summary={summary} isBusy={isUploading} />
 
             {uploadError ? (
               <div className="glass-panel rounded-[24px] border border-coral/30 bg-coral/8 p-5 text-sm leading-7 text-ink">
-                <p className="font-semibold text-coral">Upload error</p>
+                <p className="font-semibold text-coral">Indexing error</p>
                 <p className="mt-2">{uploadError}</p>
               </div>
             ) : null}
@@ -494,30 +658,64 @@ export function HomePageClient({
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <p className="text-sm font-semibold uppercase tracking-[0.18em] text-pine/70">
-                      Indexed document
+                      Indexed workspace
                     </p>
-                    <h2 className="mt-2 text-xl text-ink">{documentInfo.fileName}</h2>
+                    <h2 className="mt-2 text-xl text-ink">
+                      {indexedSources.length} source
+                      {indexedSources.length === 1 ? "" : "s"} indexed
+                    </h2>
                     <p className="mt-2 text-sm leading-6 text-ink/72">
-                      {documentInfo.chunkCount} chunks indexed
-                      {documentInfo.pageCount > 0
-                        ? ` across ${documentInfo.pageCount} page${documentInfo.pageCount === 1 ? "" : "s"}`
-                        : ""}
-                      . Session ID: {documentInfo.sessionId}
+                      {totalChunkCount} chunks across the current workspace. Session
+                      ID: {documentInfo.sessionId}
                     </p>
                   </div>
 
                   <button
                     type="button"
-                    onClick={() => clearDocument(true)}
+                    onClick={() => clearWorkspace(true)}
                     className="rounded-full border border-ink/14 px-4 py-3 text-sm font-semibold text-ink transition hover:border-pine hover:text-pine"
                   >
-                    Clear document / Upload another document
+                    Clear workspace
                   </button>
+                </div>
+
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  {indexedSources.map((source) => (
+                    <div
+                      key={source.sourceId}
+                      className="rounded-[20px] border border-ink/10 bg-white/78 p-4"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-pine/70">
+                        <span>{formatSourceType(source.sourceType)}</span>
+                        <span className="rounded-full bg-sand px-2 py-1 text-pine">
+                          {source.chunkCount} chunk{source.chunkCount === 1 ? "" : "s"}
+                        </span>
+                        {source.pageCount > 0 ? (
+                          <span className="rounded-full bg-surf/14 px-2 py-1 text-ink">
+                            {source.pageCount} page{source.pageCount === 1 ? "" : "s"}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-3 text-sm font-semibold text-ink">
+                        {source.fileName}
+                      </p>
+                      {source.sourceUrl ? (
+                        <a
+                          href={source.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 inline-flex text-xs text-pine underline-offset-4 hover:underline"
+                        >
+                          {source.sourceUrl}
+                        </a>
+                      ) : null}
+                    </div>
+                  ))}
                 </div>
 
                 {documentInfo.storageMode === "memory" ? (
                   <p className="mt-4 rounded-2xl bg-sand px-4 py-3 text-sm leading-6 text-pine">
-                    In-memory local mode is active for this session. Configure
+                    In-memory local mode is active for this workspace. Configure
                     Qdrant Cloud for persistent vector storage.
                   </p>
                 ) : null}
@@ -543,7 +741,7 @@ export function HomePageClient({
         </section>
 
         <section className="mt-8 glass-panel rounded-[28px] p-6 shadow-soft">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.24em] text-pine/70">
                 Sources
@@ -551,16 +749,33 @@ export function HomePageClient({
               <h2 className="mt-2 text-2xl text-ink">Retrieved snippets</h2>
             </div>
             <span className="rounded-full bg-surf/14 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-ink">
-              Top chunks
+              {lastRetrievalMeta
+                ? getRetrievalModeLabel(lastRetrievalMeta.retrievalMode)
+                : "Grounding"}
             </span>
           </div>
+
+          {lastRetrievalMeta ? (
+            <div className="mt-5 rounded-[22px] border border-ink/10 bg-white/76 p-4 text-sm leading-7 text-ink/74">
+              <p className="font-semibold text-ink">
+                Retrieval decision: {getRetrievalModeLabel(lastRetrievalMeta.retrievalMode)}
+              </p>
+              <p className="mt-2">{lastRetrievalMeta.evaluationReason}</p>
+              {lastRetrievalMeta.rewrittenQuery ? (
+                <p className="mt-2">
+                  Final retrieval query: {lastRetrievalMeta.finalQuery}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="mt-6 space-y-3">
             {sources.length === 0 ? (
               <div className="rounded-[22px] border border-dashed border-ink/12 bg-white/70 p-6 text-center">
                 <p className="mx-auto max-w-xl text-sm leading-7 text-ink/62">
-                  Retrieved source snippets appear here after each answer so you
-                  can verify the document context behind the response.
+                  {lastRetrievalMeta?.retrievalMode === "insufficient"
+                    ? "DocuMind refused the last question because the indexed workspace did not provide enough support for a grounded answer."
+                    : "Retrieved source snippets appear here after each answer so you can verify the context behind the response."}
                 </p>
               </div>
             ) : (
@@ -582,17 +797,18 @@ export function HomePageClient({
           </h2>
           <div className="mt-6 space-y-4 text-sm leading-7 text-ink/74">
             <p>
-              DocuMind helps users ask questions over PDFs and text files
-              without losing track of where the answer came from.
+              DocuMind helps users ask questions over PDFs, text files, CSV files,
+              and indexed web pages without losing track of where the answer came
+              from.
             </p>
             <p>
-              Each response is generated from retrieved document snippets, so
-              users can review the source context instead of trusting a
-              black-box answer.
+              Each response is generated from retrieved source snippets, so users
+              can review the supporting context instead of trusting a black-box
+              answer.
             </p>
             <p>
-              Use it for study notes, reports, policies, research papers, and
-              other documents where grounded answers matter.
+              Use it for study notes, reports, policies, research papers, product
+              documents, and other sources where grounded answers matter.
             </p>
           </div>
           <a

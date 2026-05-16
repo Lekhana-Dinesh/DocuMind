@@ -1,8 +1,8 @@
 # DocuMind
 
-DocuMind is a web-based document question-answering application that lets users upload a PDF or text file and ask questions grounded in the uploaded document.
+DocuMind is a Gemini-powered RAG application for asking grounded questions over indexed PDFs, text files, CSV files, and web pages.
 
-It implements a complete Retrieval-Augmented Generation (RAG) pipeline: document upload, text extraction, chunking, embedding, vector storage, semantic retrieval, and grounded answer generation.
+It keeps the full retrieval pipeline visible end to end: ingest content, extract text, split it into overlapping chunks, create Gemini embeddings, store vectors in Qdrant, retrieve the most relevant chunks, and generate answers using only retrieved context.
 
 ## Live Project
 
@@ -12,18 +12,32 @@ https://documind-five-theta.vercel.app/
 
 https://github.com/Lekhana-Dinesh/DocuMind
 
+## What’s New
+
+- Corrective RAG flow with direct retrieval, query rewriting, and honest refusal when context is still weak
+- Multi-source workspace support under one session
+- CSV ingestion
+- URL ingestion for pages you intentionally add to the workspace
+- Source-type aware citations for PDF, text, CSV, and web page content
+
 ## Features
 
-- Upload PDF and plain text documents.
-- Extract document text on the server.
-- Split extracted text into overlapping chunks.
-- Generate semantic embeddings using Gemini.
-- Store and retrieve embeddings using Qdrant Cloud.
-- Ask natural language questions about the uploaded document.
-- Generate answers using only retrieved document context.
-- Refuse unsupported questions when the answer is not present in the document.
-- Display source snippets with chunk/page metadata for verification.
-- Clear the current document and upload another file.
+- Upload PDF, TXT, and CSV files
+- Paste a URL to index a web page into the same workspace
+- Extract readable text on the server
+- Split content into overlapping chunks with a lightweight custom chunker
+- Generate embeddings using Gemini
+- Store and search vectors in Qdrant Cloud
+- Fall back to in-memory local storage when `QDRANT_URL` is not configured
+- Run a Corrective RAG loop before answering:
+  - retrieve
+  - evaluate retrieval quality
+  - rewrite the query if needed
+  - retrieve again
+  - answer or refuse
+- Answer only from indexed context
+- Show source snippets, chunk numbers, page numbers, and source type
+- Clear the current workspace and start again
 
 ## Tech Stack
 
@@ -31,50 +45,99 @@ https://github.com/Lekhana-Dinesh/DocuMind
 |---|---|
 | Frontend | Next.js App Router, React, TypeScript |
 | Styling | Tailwind CSS |
-| Backend | Next.js API Routes |
-| LLM | Gemini |
-| Embeddings | Gemini Embeddings |
+| Backend | Next.js route handlers |
+| Generation | Gemini |
+| Embeddings | Gemini embeddings |
 | Vector Database | Qdrant Cloud |
 | PDF Parsing | pdf-parse |
 | Deployment | Vercel |
 
-## How It Works
+## Architecture
 
 ```text
-User uploads PDF/TXT
+File / URL source
         ↓
-Server extracts text
+Server-side text extraction
         ↓
-Text is split into chunks
+Custom overlapping chunker
         ↓
-Gemini creates embeddings
+Gemini embeddings
         ↓
-Qdrant stores vectors + metadata
+Qdrant vector storage
         ↓
-User asks a question
+Top-K retrieval
         ↓
-Question is embedded
+Retrieval evaluation
         ↓
-Relevant chunks are retrieved
+Query rewrite if needed
         ↓
-Gemini answers using retrieved context only
+Final retrieval
         ↓
-Answer + source snippets are shown
+Gemini answer generation from retrieved context only
+        ↓
+Answer + source snippets + retrieval mode
 ```
 
-## RAG Pipeline
+## Corrective RAG Flow
 
-### 1. Document Upload
+DocuMind uses a lightweight Corrective RAG loop instead of a single retrieval pass.
 
-The user uploads a `.pdf` or `.txt` file through the web interface. Upload processing happens on the server so API keys and database credentials are not exposed to the client.
+### 1. Direct retrieval
 
-### 2. Text Extraction
+The app embeds the original user question and retrieves the top chunks from Qdrant.
 
-The app extracts readable text from the uploaded document. Text files are read directly, while PDFs are processed using `pdf-parse`.
+### 2. Retrieval evaluation
 
-### 3. Chunking Strategy
+Retrieved chunks are evaluated with deterministic checks:
 
-DocuMind uses a lightweight custom chunking utility.
+- no chunks returned
+- chunks too short
+- combined context too small
+- top similarity score below threshold
+- weak lexical support when semantic scores are already low
+
+### 3. Query rewrite when needed
+
+If the first retrieval looks weak, Gemini rewrites the question into a retrieval-oriented query. The rewrite step never answers the question. It only tries to improve retrieval.
+
+### 4. Second retrieval
+
+The rewritten query is embedded and searched against the same indexed workspace.
+
+### 5. Final behavior
+
+- If the second retrieval is relevant enough, DocuMind answers with `Corrected retrieval`
+- If the first retrieval was already strong, DocuMind answers with `Direct retrieval`
+- If both retrieval passes are weak, DocuMind refuses with:
+
+```text
+I could not find enough information in the uploaded document to answer that.
+```
+
+## Ingestion Modes
+
+### File ingestion
+
+Supported file types:
+
+- `.pdf`
+- `.txt`
+- `.csv`
+
+### URL ingestion
+
+Users can paste a URL to fetch and index a web page.
+
+Important behavior:
+
+- The page is fetched once during ingestion
+- Readable text is extracted and indexed like any other source
+- Chat answers can use that page only after it has been indexed
+- DocuMind does not perform live web browsing during chat
+
+## Chunking Strategy
+
+DocuMind uses a lightweight custom chunker to keep the pipeline easy to read and explain.
 
 Current configuration:
 
@@ -83,68 +146,56 @@ Chunk size: 900 characters
 Chunk overlap: 120 characters
 ```
 
-Each chunk stores metadata:
+Each chunk preserves:
 
 ```text
 documentId
+sessionId
+sourceId
 fileName
+fileType
+sourceType
+sourceUrl
 pageNumber
 chunkIndex
 text
 ```
 
-The overlap helps preserve context across chunk boundaries and improves retrieval quality.
+## Vector Storage
 
-### 4. Embedding
+Qdrant Cloud is the recommended storage mode.
 
-Each document chunk is converted into a vector using Gemini embeddings.
+The app stores:
 
-Default embedding model:
+- unnamed vectors
+- cosine distance
+- payload metadata for document filtering and source display
 
-```env
-GEMINI_EMBEDDING_MODEL=gemini-embedding-001
-```
+Retrieval is filtered by `documentId`, which maps to the active workspace session. That keeps answers restricted to the content the user indexed in the current workspace.
 
-The same embedding model is used to embed user questions during retrieval.
+If `QDRANT_URL` is empty, the app uses an in-memory local store for development only.
 
-### 5. Vector Storage
+## Grounding and Hallucination Prevention
 
-Embeddings are stored in Qdrant Cloud with payload metadata. The app filters retrieval by `documentId`, so each chat session only searches inside the currently uploaded document.
+DocuMind reduces hallucination with several guardrails:
 
-### 6. Retrieval
-
-For every user question, DocuMind embeds the question and retrieves the most relevant chunks from Qdrant using semantic search.
-
-### 7. Grounded Answer Generation
-
-Only the retrieved chunks are passed to Gemini. The model is instructed to answer only from the provided context.
-
-If the answer is not found in the uploaded document, DocuMind responds:
-
-```text
-I could not find enough information in the uploaded document to answer that.
-```
-
-## Grounding and Source Verification
-
-DocuMind is designed to reduce hallucination by:
-
-- Passing only retrieved chunks to the LLM.
-- Filtering retrieval by the active document session.
-- Refusing when context is missing or insufficient.
-- Showing source snippets used for the answer.
-- Including chunk/page metadata where available.
-
-This makes each answer easier to verify against the original document.
+- only retrieved chunks are sent to Gemini
+- retrieval is filtered to the active indexed workspace
+- retrieval quality is evaluated before answer generation
+- a second retrieval pass happens only after a query rewrite
+- if both passes are weak, the app refuses honestly
+- source snippets are always shown for grounded answers
+- answer generation is instructed not to use outside knowledge
 
 ## Project Structure
 
 ```text
-DocuMind/
+documind-rag/
   app/
     api/
-      upload/route.ts
       chat/route.ts
+      ingest-url/route.ts
+      upload/route.ts
     page.tsx
 
   components/
@@ -158,9 +209,14 @@ DocuMind/
   lib/
     rag/
       chunkDocument.ts
+      correctiveRetrieve.ts
       embeddings.ts
+      evaluateRetrieval.ts
       extractText.ts
+      extractWebPage.ts
       generateAnswer.ts
+      indexParsedDocument.ts
+      queryRewrite.ts
       retrieve.ts
       vectorStore.ts
     env.ts
@@ -169,34 +225,29 @@ DocuMind/
 
 ## Environment Variables
 
-Create a `.env.local` file for local development.
+Create a `.env.local` file:
 
 ```env
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
-
+DEBUG_RAG=
 QDRANT_URL=
 QDRANT_API_KEY=
-QDRANT_COLLECTION=documind_rag_v3
-
-DEBUG_RAG=
+QDRANT_COLLECTION=documind_rag
 ```
 
-`DEBUG_RAG=true` enables detailed Qdrant diagnostics during local debugging. It should usually be left blank in production.
+Notes:
+
+- `DEBUG_RAG=true` enables verbose Qdrant diagnostics
+- Leave `QDRANT_URL` blank to use in-memory local mode
+- If `QDRANT_URL` is set, `QDRANT_API_KEY` must also be set
 
 ## Local Setup
-
-Clone the repository:
 
 ```bash
 git clone https://github.com/Lekhana-Dinesh/DocuMind.git
 cd DocuMind
-```
-
-Install dependencies:
-
-```bash
 npm install
 ```
 
@@ -206,13 +257,13 @@ Create the environment file:
 cp .env.example .env.local
 ```
 
-For Windows PowerShell:
+PowerShell:
 
 ```powershell
 Copy-Item .env.example .env.local
 ```
 
-Run the development server:
+Start development:
 
 ```bash
 npm run dev
@@ -232,69 +283,60 @@ npm run build
 
 ## Deployment
 
-The project is deployed on Vercel.
-
-Before deployment, add the required environment variables in the Vercel project settings:
+Deploy on Vercel and configure:
 
 ```env
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+DEBUG_RAG=
 QDRANT_URL=
 QDRANT_API_KEY=
-QDRANT_COLLECTION=documind_rag_v3
-DEBUG_RAG=
+QDRANT_COLLECTION=documind_rag
 ```
 
-After adding environment variables, redeploy the project.
+## Testing Ideas
 
-## Testing
+### Direct retrieval
 
-Use a sample text file:
-
-```text
-DocuMind is a document question answering app.
-It uses Gemini embeddings, Qdrant vector storage, and Gemini answer generation.
-The app answers only from uploaded document content.
-```
-
-Ask:
-
-```text
-What vector storage does DocuMind use?
-```
+Upload a document with a clearly stated fact and ask for that fact.
 
 Expected behavior:
 
-- The app answers from the document.
-- The answer mentions Qdrant.
-- A source snippet is shown.
+- retrieval mode shows `Direct retrieval`
+- answer cites the retrieved chunk
 
-Ask an unrelated question:
+### Corrected retrieval
 
-```text
-Who is the CEO of Google?
-```
+Ask a vague question that still maps to the indexed content but is not phrased like the source.
 
 Expected behavior:
 
-- The app refuses because the answer is not present in the uploaded document.
+- the app may refine the retrieval query
+- retrieval mode shows `Corrected retrieval`
+- source snippets still support the final answer
 
+### Honest refusal
 
+Ask something unrelated to the indexed workspace.
+
+Expected behavior:
+
+- retrieval mode shows `Insufficient context`
+- the app refuses instead of inventing an answer
 
 ## Limitations
 
-- Scanned PDFs are not supported unless they contain selectable text.
-- Very large documents may be limited by hosting request size limits.
-- The current version focuses on one active document session at a time.
-- Multi-document workspaces and user accounts are not included yet.
+- Scanned PDFs are not supported unless they contain selectable text
+- URL extraction uses a lightweight readable-text approach and may miss heavily scripted pages
+- The current version does not include authentication or saved user workspaces
+- Very large documents may still be constrained by hosting request limits
 
 ## Future Improvements
 
-- OCR support for scanned PDFs
-- Multi-document workspaces
-- Persistent document history
-- User authentication
-- Streaming responses
-- Hybrid keyword + vector search
-- Exportable chat history
+- OCR for scanned PDFs
+- Better HTML readability extraction for complex web pages
+- Workspace history and saved sessions
+- Hybrid retrieval with keyword + vector search
+- Streaming answer tokens
+- User accounts and shared workspaces

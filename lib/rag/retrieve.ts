@@ -8,10 +8,11 @@ interface RetrieveParams {
   limit?: number;
 }
 
-const DEFAULT_LIMIT = 4;
-const MIN_SOURCE_TEXT_LENGTH = 80;
-const MIN_COMBINED_CONTEXT_LENGTH = 160;
-const MIN_TOP_SCORE = 0.18;
+const DEFAULT_LIMIT = 5;
+
+function normalizeChunkText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
 
 export async function retrieveRelevantChunks({
   documentId,
@@ -25,17 +26,10 @@ export async function retrieveRelevantChunks({
     limit,
   });
 
-  const usable = results.filter((chunk) => chunk.text.trim().length >= MIN_SOURCE_TEXT_LENGTH);
-  const combinedLength = usable.reduce((sum, chunk) => sum + chunk.text.length, 0);
-  const topScore = usable[0]?.score ?? 0;
-
-  if (usable.length === 0 || combinedLength < MIN_COMBINED_CONTEXT_LENGTH) {
-    return [];
-  }
-
-  if (typeof usable[0]?.score === "number" && topScore < MIN_TOP_SCORE) {
-    return [];
-  }
-
-  return usable;
+  return results
+    .map((chunk) => ({
+      ...chunk,
+      text: normalizeChunkText(chunk.text),
+    }))
+    .filter((chunk) => chunk.text.length > 0);
 }

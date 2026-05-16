@@ -34,7 +34,7 @@ export function assertQdrantConfigured() {
 
   if (!env.qdrantUrl) {
     throw new Error(
-      "QDRANT_URL is not configured. Leave it blank to use in-memory demo mode, or set both QDRANT_URL and QDRANT_API_KEY for Qdrant Cloud.",
+      "QDRANT_URL is not configured. Leave it blank to use in-memory local mode, or set both QDRANT_URL and QDRANT_API_KEY for Qdrant Cloud.",
     );
   }
 

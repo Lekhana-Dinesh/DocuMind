@@ -17,16 +17,26 @@ const SYSTEM_INSTRUCTION =
   "You are DocuMind, a document-grounded assistant. Answer only using the provided context. Do not use outside knowledge. If the answer is not available in the context, say: 'I could not find enough information in the uploaded document to answer that.' Keep the answer concise and cite page/chunk references where available.";
 
 function buildCitationLabel(source: RetrievedChunk) {
-  const pagePart =
-    typeof source.pageNumber === "number" ? `page ${source.pageNumber}` : "text file";
-  return `${pagePart}, chunk ${source.chunkIndex + 1}`;
+  if (typeof source.pageNumber === "number") {
+    return `page ${source.pageNumber}, chunk ${source.chunkIndex + 1}`;
+  }
+
+  if (source.sourceType === "csv") {
+    return `CSV chunk ${source.chunkIndex + 1}`;
+  }
+
+  if (source.sourceType === "web_page") {
+    return `web page chunk ${source.chunkIndex + 1}`;
+  }
+
+  return `chunk ${source.chunkIndex + 1}`;
 }
 
 function buildContext(sources: RetrievedChunk[]) {
   return sources
     .map(
       (source, index) =>
-        `[S${index + 1}] ${source.fileName} | ${buildCitationLabel(source)}\n${source.text}`,
+        `[S${index + 1}] ${source.fileName}${source.sourceUrl ? ` | ${source.sourceUrl}` : ""} | ${buildCitationLabel(source)}\n${source.text}`,
     )
     .join("\n\n---\n\n");
 }

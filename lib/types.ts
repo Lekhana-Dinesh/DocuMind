@@ -8,6 +8,8 @@ export type IndexingStage =
   | "ready";
 
 export type StepStatus = "pending" | "active" | "complete" | "error";
+export type SourceType = "pdf" | "text" | "csv" | "web_page";
+export type RetrievalMode = "direct" | "corrected" | "insufficient";
 
 export interface ParsedPage {
   pageNumber?: number;
@@ -17,6 +19,8 @@ export interface ParsedPage {
 export interface ParsedDocument {
   fileName: string;
   fileType: string;
+  sourceType: SourceType;
+  sourceUrl?: string;
   pages: ParsedPage[];
   text: string;
   pageCount: number;
@@ -26,7 +30,11 @@ export interface DocumentChunk {
   id: string;
   documentId: string;
   sessionId: string;
+  sourceId: string;
   fileName: string;
+  fileType: string;
+  sourceType: SourceType;
+  sourceUrl?: string;
   text: string;
   pageNumber?: number;
   chunkIndex: number;
@@ -39,7 +47,11 @@ export interface RetrievedChunk extends DocumentChunk {
 
 export interface SourceSnippet {
   id: string;
+  sourceId: string;
   fileName: string;
+  fileType: string;
+  sourceType: SourceType;
+  sourceUrl?: string;
   text: string;
   pageNumber?: number;
   chunkIndex: number;
@@ -48,8 +60,11 @@ export interface SourceSnippet {
 
 export interface UploadedDocument {
   sessionId: string;
+  sourceId: string;
   fileName: string;
   fileType: string;
+  sourceType: SourceType;
+  sourceUrl?: string;
   pageCount: number;
   chunkCount: number;
   storageMode: VectorStoreMode;
@@ -61,6 +76,10 @@ export interface ChatMessage {
   content: string;
   refused?: boolean;
   sources?: SourceSnippet[];
+  retrievalMode?: RetrievalMode;
+  finalQuery?: string;
+  rewrittenQuery?: string;
+  evaluationReason?: string;
 }
 
 export interface ChatApiResponse {
@@ -68,6 +87,11 @@ export interface ChatApiResponse {
   refused: boolean;
   sources: SourceSnippet[];
   citationIds: string[];
+  retrievalMode: RetrievalMode;
+  originalQuery: string;
+  finalQuery: string;
+  rewrittenQuery?: string;
+  evaluationReason: string;
 }
 
 export interface UploadStatusEvent {

@@ -391,7 +391,11 @@ export async function indexDocumentChunks({
         payload: {
           documentId: chunk.documentId,
           sessionId: chunk.sessionId,
+          sourceId: chunk.sourceId,
           fileName: chunk.fileName,
+          fileType: chunk.fileType,
+          sourceType: chunk.sourceType,
+          sourceUrl: chunk.sourceUrl ?? null,
           text: chunk.text,
           pageNumber: chunk.pageNumber ?? null,
           chunkIndex: chunk.chunkIndex,
@@ -493,7 +497,20 @@ export async function searchDocumentChunks({
         id: String(result.id),
         documentId: String(payload.documentId ?? documentId),
         sessionId: String(payload.sessionId ?? documentId),
+        sourceId: String(payload.sourceId ?? payload.documentId ?? documentId),
         fileName: String(payload.fileName ?? "document"),
+        fileType: String(payload.fileType ?? "text/plain"),
+        sourceType:
+          payload.sourceType === "pdf" ||
+          payload.sourceType === "text" ||
+          payload.sourceType === "csv" ||
+          payload.sourceType === "web_page"
+            ? payload.sourceType
+            : "text",
+        sourceUrl:
+          typeof payload.sourceUrl === "string" && payload.sourceUrl.trim()
+            ? payload.sourceUrl
+            : undefined,
         text: String(payload.text ?? ""),
         pageNumber:
           typeof payload.pageNumber === "number" ? payload.pageNumber : undefined,

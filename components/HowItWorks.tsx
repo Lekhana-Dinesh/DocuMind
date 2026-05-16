@@ -1,15 +1,15 @@
 const steps = [
   {
-    title: "1. Upload",
-    body: "The user uploads a PDF or plain text file through the Next.js interface.",
+    title: "1. Ingest",
+    body: "Users add PDFs, text files, CSV files, or a web page URL through the Next.js interface.",
   },
   {
     title: "2. Extract",
-    body: "Server-side code reads the file and extracts clean text, preserving page metadata for PDFs.",
+    body: "Server-side code extracts readable text and preserves source metadata, including PDF page numbers and source labels.",
   },
   {
     title: "3. Chunk",
-    body: "A lightweight custom chunker splits the document into overlapping sections for better retrieval.",
+    body: "A lightweight custom chunker splits each source into overlapping sections for better semantic retrieval.",
   },
   {
     title: "4. Embed + Store",
@@ -17,27 +17,34 @@ const steps = [
   },
   {
     title: "5. Retrieve",
-    body: "At question time, DocuMind embeds the query and fetches the most relevant chunks by semantic similarity.",
+    body: "At question time, DocuMind embeds the query and retrieves the most relevant chunks from the indexed workspace.",
   },
   {
-    title: "6. Generate",
-    body: "Only the retrieved context is sent to Gemini, which answers with source-backed grounding.",
+    title: "6. Correct if needed",
+    body: "If the first retrieval looks weak, Gemini rewrites the query for retrieval and DocuMind runs a second pass before answering.",
+  },
+  {
+    title: "7. Generate",
+    body: "Only the final retrieved context is sent to Gemini, which answers concisely and cites the supporting chunks.",
   },
 ];
 
 export function HowItWorks() {
   return (
-    <section id="how-it-works" className="fade-up glass-panel rounded-[32px] p-8 shadow-soft">
+    <section
+      id="how-it-works"
+      className="fade-up glass-panel rounded-[32px] p-8 shadow-soft"
+    >
       <div className="max-w-2xl">
         <p className="text-sm font-semibold uppercase tracking-[0.24em] text-pine/70">
           How it works
         </p>
         <h2 className="mt-2 text-3xl text-ink">
-          Upload, retrieve, and answer with a transparent RAG pipeline
+          Corrective RAG with visible retrieval decisions
         </h2>
         <p className="mt-3 text-sm leading-7 text-ink/72">
-          DocuMind keeps the flow transparent while still showing the full RAG
-          chain end-to-end.
+          DocuMind keeps the pipeline transparent from ingestion through answer
+          generation, and it retries retrieval only when the first pass looks weak.
         </p>
       </div>
 

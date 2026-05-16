@@ -68,6 +68,7 @@ function splitIntoOverlappingChunks(text: string) {
 export async function chunkDocument(
   document: ParsedDocument,
   sessionId: string,
+  sourceId = crypto.randomUUID(),
 ): Promise<DocumentChunk[]> {
   const units =
     document.pages.length > 0 ? document.pages : [{ text: document.text }];
@@ -91,7 +92,11 @@ export async function chunkDocument(
         id: crypto.randomUUID(),
         documentId: sessionId,
         sessionId,
+        sourceId,
         fileName: document.fileName,
+        fileType: document.fileType,
+        sourceType: document.sourceType,
+        sourceUrl: document.sourceUrl,
         text: normalized,
         pageNumber: unit.pageNumber,
         chunkIndex,

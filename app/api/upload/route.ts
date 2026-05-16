@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { MAX_FILE_SIZE_BYTES } from "@/lib/env";
-import { chunkDocument } from "@/lib/rag/chunkDocument";
-import { embedTexts } from "@/lib/rag/embeddings";
 import { extractTextFromFile } from "@/lib/rag/extractText";
-import { clearSessionVectors, indexDocumentChunks } from "@/lib/rag/vectorStore";
-import type { IndexingStage } from "@/lib/types";
-import type { UploadStreamEvent } from "@/lib/types";
+import { indexParsedDocument } from "@/lib/rag/indexParsedDocument";
+import { clearSessionVectors } from "@/lib/rag/vectorStore";
+import type { IndexingStage, UploadStreamEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -15,29 +13,43 @@ function isSupportedUpload(fileName: string, mimeType: string) {
   return (
     lowerName.endsWith(".pdf") ||
     lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".csv") ||
     mimeType === "application/pdf" ||
-    mimeType === "text/plain"
+    mimeType === "text/plain" ||
+    mimeType === "text/csv" ||
+    mimeType === "application/csv" ||
+    mimeType === "application/vnd.ms-excel"
   );
 }
 
-function streamEvent(controller: ReadableStreamDefaultController, event: UploadStreamEvent) {
+function streamEvent(
+  controller: ReadableStreamDefaultController,
+  event: UploadStreamEvent,
+) {
   controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
 }
 
 export async function POST(request: Request) {
   const formData = await request.formData();
   const file = formData.get("file");
+  const sessionIdField = formData.get("sessionId");
 
   if (!(file instanceof File)) {
     return NextResponse.json(
-      { error: "No file was uploaded. Choose a PDF or text file to continue." },
+      {
+        error:
+          "No file was uploaded. Choose a PDF, text file, or CSV to continue.",
+      },
       { status: 400 },
     );
   }
 
   if (!isSupportedUpload(file.name, file.type)) {
     return NextResponse.json(
-      { error: "Unsupported file type. Upload a PDF or plain text file only." },
+      {
+        error:
+          "Unsupported file type. Upload a PDF, plain text file, or CSV only.",
+      },
       { status: 400 },
     );
   }
@@ -49,7 +61,10 @@ export async function POST(request: Request) {
     );
   }
 
-  const sessionId = crypto.randomUUID();
+  const sessionId =
+    typeof sessionIdField === "string" && sessionIdField.trim()
+      ? sessionIdField.trim()
+      : crypto.randomUUID();
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -59,7 +74,7 @@ export async function POST(request: Request) {
         streamEvent(controller, {
           type: "status",
           stage: "extracting",
-          message: "Extracting text from the uploaded document...",
+          message: "Extracting text from the uploaded source...",
         });
 
         const buffer = Buffer.from(await file.arrayBuffer());
@@ -69,46 +84,22 @@ export async function POST(request: Request) {
           buffer,
         });
 
-        currentStage = "chunking";
-        streamEvent(controller, {
-          type: "status",
-          stage: "chunking",
-          message: "Splitting the document into overlapping chunks...",
-        });
-
-        const chunks = await chunkDocument(parsedDocument, sessionId);
-
-        currentStage = "embedding";
-        streamEvent(controller, {
-          type: "status",
-          stage: "embedding",
-          message: "Creating embeddings for each document chunk...",
-        });
-
-        const embeddings = await embedTexts(chunks.map((chunk) => chunk.text));
-
-        currentStage = "storing";
-        streamEvent(controller, {
-          type: "status",
-          stage: "storing",
-          message: "Saving chunk vectors to the configured vector store...",
-        });
-
-        const storageMode = await indexDocumentChunks({
-          chunks,
-          embeddings,
+        const indexedSource = await indexParsedDocument({
+          parsedDocument,
+          sessionId,
+          onStatus: (stage, message) => {
+            currentStage = stage;
+            streamEvent(controller, {
+              type: "status",
+              stage,
+              message,
+            });
+          },
         });
 
         streamEvent(controller, {
           type: "complete",
-          data: {
-            sessionId,
-            fileName: parsedDocument.fileName,
-            fileType: parsedDocument.fileType,
-            pageCount: parsedDocument.pageCount,
-            chunkCount: chunks.length,
-            storageMode,
-          },
+          data: indexedSource,
         });
       } catch (error) {
         streamEvent(controller, {
@@ -117,7 +108,7 @@ export async function POST(request: Request) {
           error:
             error instanceof Error
               ? error.message
-              : "Something went wrong while indexing the uploaded document.",
+              : "Something went wrong while indexing the uploaded source.",
         });
       } finally {
         controller.close();
